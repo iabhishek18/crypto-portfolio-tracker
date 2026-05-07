@@ -1,35 +1,39 @@
-import { Router, Request, Response } from 'express';
-import { PriceService } from '../services/priceService';
+import { Router, Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
+import * as portfolioService from '../services/portfolioService';
 
 export const portfolioRoutes = Router();
-const priceService = new PriceService();
-const portfolios = new Map<string, Array<{ coinId: string; amount: number; buyPrice: number; buyDate: string }>>();
 
-portfolioRoutes.post('/holdings', (req: Request, res: Response) => {
-  const { userId, coinId, amount, buyPrice } = req.body;
-  if (!portfolios.has(userId)) portfolios.set(userId, []);
-  portfolios.get(userId)!.push({ coinId, amount, buyPrice, buyDate: new Date().toISOString() });
-  res.status(201).json({ success: true });
+const addHoldingSchema = z.object({ coinId: z.string().min(1), amount: z.number().positive(), buyPrice: z.number().positive(), notes: z.string().optional() });
+const createAlertSchema = z.object({ coinId: z.string().min(1), targetPrice: z.number().positive(), direction: z.enum(['above', 'below']) });
+
+portfolioRoutes.get('/:userId', (req: Request, res: Response) => {
+  const summary = portfolioService.getPortfolio(req.params.userId!);
+  res.json({ success: true, data: summary });
 });
 
-portfolioRoutes.get('/:userId', async (req: Request, res: Response) => {
-  const holdings = portfolios.get(req.params.userId) || [];
-  const coinIds = [...new Set(holdings.map(h => h.coinId))];
-  const prices = await priceService.fetchPrices(coinIds);
-  
-  const portfolio = holdings.map(h => {
-    const current = prices[h.coinId];
-    const currentValue = current ? current.current_price * h.amount : 0;
-    const investedValue = h.buyPrice * h.amount;
-    return { ...h, currentPrice: current?.current_price || 0, currentValue, investedValue, pnl: currentValue - investedValue, pnlPercentage: ((currentValue - investedValue) / investedValue) * 100 };
-  });
-
-  const totalValue = portfolio.reduce((s, p) => s + p.currentValue, 0);
-  const totalInvested = portfolio.reduce((s, p) => s + p.investedValue, 0);
-  res.json({ success: true, data: { holdings: portfolio, totalValue, totalInvested, totalPnl: totalValue - totalInvested, totalPnlPercentage: ((totalValue - totalInvested) / totalInvested) * 100 } });
+portfolioRoutes.post('/:userId/holdings', (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = addHoldingSchema.parse(req.body);
+    const holding = portfolioService.addHolding(req.params.userId!, data.coinId, data.amount, data.buyPrice, data.notes);
+    res.status(201).json({ success: true, data: holding });
+  } catch (e) { next(e); }
 });
 
-portfolioRoutes.get('/prices/top', async (_req: Request, res: Response) => {
-  const prices = await priceService.fetchPrices();
-  res.json({ success: true, data: Object.values(prices).slice(0, 20) });
+portfolioRoutes.delete('/:userId/holdings/:holdingId', (req: Request, res: Response) => {
+  const removed = portfolioService.removeHolding(req.params.userId!, req.params.holdingId!);
+  if (!removed) { res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Holding not found' } }); return; }
+  res.status(204).end();
+});
+
+portfolioRoutes.get('/:userId/alerts', (req: Request, res: Response) => {
+  res.json({ success: true, data: portfolioService.getAlerts(req.params.userId!) });
+});
+
+portfolioRoutes.post('/:userId/alerts', (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = createAlertSchema.parse(req.body);
+    const alert = portfolioService.createAlert(req.params.userId!, data.coinId, data.targetPrice, data.direction);
+    res.status(201).json({ success: true, data: alert });
+  } catch (e) { next(e); }
 });
